@@ -5,6 +5,8 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.util.Log
 import kotlin.math.sqrt
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
 
@@ -28,6 +30,14 @@ class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
     private val micProcessor: RealtimeMicProcessor = RealtimeMicProcessor()
     // Real-time-safe FFT engine (KissFFT via JNI)
     private val fftEngine: RealtimeFFTEngine = RealtimeFFTEngine(fftSize = fftSize, downsampleBins = downsampleBins)
+
+    // Single reusable background worker for non-real-time DSP work
+    private val processingExecutor: ExecutorService =
+        Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "AudioEngine-Worker").apply {
+                priority = Thread.NORM_PRIORITY
+            }
+        }
 
     data class AudioData(
         val timestamp: Double,
@@ -191,8 +201,9 @@ class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
         val readBuffer = ShortArray(bufferSize)
         val floatBuffer = FloatArray(bufferSize) // For processing
         
-        var lastCallbackTime = 0L
-        val updateIntervalMs = 1000 / callbackRateHz
+        // Use monotonic clock for audio timing
+        var lastCallbackTimeNs = 0L
+        val updateIntervalNs = 1_000_000_000L / callbackRateHz
 
         while (isRunning) {
             val record = audioRecord ?: break
@@ -210,24 +221,23 @@ class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
                     floatBuffer[i] = readBuffer[i] / 32768.0f
                 }
 
-                val now = System.currentTimeMillis()
-                if (now - lastCallbackTime >= updateIntervalMs) {
-                    // Note: DSP processing removed as part of microphone input layer refactor
-                    // AudioEngine now only captures raw PCM data
-                    // DSP processing (RMS, peak detection, FFT) is handled by external processors
-                    
-                    // Process data on background thread to avoid blocking audio thread
-                    Thread {
+                val nowNs = System.nanoTime()
+                if (lastCallbackTimeNs == 0L || (nowNs - lastCallbackTimeNs) >= updateIntervalNs) {
+                    // Convert monotonic nanoseconds to milliseconds for downstream consumers
+                    val timestampMs = nowNs / 1_000_000.0
+
+                    // Offload non-real-time DSP work to a single reusable background worker
+                    processingExecutor.execute {
                         processAudioData(
-                            timestamp = now.toDouble(),
+                            timestamp = timestampMs,
                             sampleRate = sampleRate,
                             bufferSize = readCount,
                             timeData = if (emitTimeData) floatBuffer.copyOfRange(0, readCount) else null,
                             rawSamples = floatBuffer.copyOfRange(0, readCount)
                         )
-                    }.start()
-                    
-                    lastCallbackTime = now
+                    }
+
+                    lastCallbackTimeNs = nowNs
                 }
             }
         }
@@ -246,7 +256,7 @@ class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
         // Here we perform non-real-time DSP: RMS/peak calculation and FFT analysis.
 
         // --- Microphone Level Analysis (RMS + Peak with optional smoothing) ---
-        val levelData: LevelData = micProcessor.processBuffer(rawSamples, bufferSize)
+        val levelData = micProcessor.processBuffer(rawSamples, bufferSize)
         val rms = levelData.rms.toDouble()
         val peak = levelData.peak.toDouble()
 
