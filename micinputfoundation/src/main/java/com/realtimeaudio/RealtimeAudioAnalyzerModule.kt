@@ -34,8 +34,13 @@ class RealtimeAudioAnalyzerModule(
       val callbackRateHz = 30
       val emitFft = true
       val emitTimeData = if (config.hasKey("enableTimeData")) config.getBoolean("enableTimeData") else true
+      val calibrationA4Hz: Double? = when {
+        config.hasKey("calibrationA4Hz") -> config.getDouble("calibrationA4Hz")
+        config.hasKey("a4Hz") -> config.getDouble("a4Hz")
+        else -> null
+      }
 
-      engine.start(bufferSize, sampleRate, callbackRateHz, emitFft, emitTimeData)
+      engine.start(bufferSize, sampleRate, callbackRateHz, emitFft, emitTimeData, calibrationA4Hz)
       promise.resolve(null)
     } catch (e: SecurityException) {
       promise.reject("E_PERMISSION_DENIED", "Microphone permission denied: ${e.message}", e)
@@ -115,5 +120,27 @@ class RealtimeAudioAnalyzerModule(
     reactApplicationContext
       .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
       .emit("RealtimeAudioAnalyzer:onData", params())
+
+    data.pitch?.let { emitPitchUpdate(it) }
+  }
+
+  private fun emitPitchUpdate(result: PitchResult) {
+    if (!reactApplicationContext.hasActiveReactInstance()) return
+
+    val payload: WritableMap =
+      Arguments.createMap().apply {
+        putDouble("detectedFrequency", result.detectedFrequency)
+        if (result.noteName != null) putString("noteName", result.noteName) else putNull("noteName")
+        if (result.octave != null) putInt("octave", result.octave) else putNull("octave")
+        if (result.centsOffset != null) putDouble("centsOffset", result.centsOffset) else putNull("centsOffset")
+        putDouble("confidence", result.confidence)
+        if (result.inputLevel != null) putDouble("inputLevel", result.inputLevel) else putNull("inputLevel")
+        putBoolean("isStable", result.isStable)
+        putString("tuningState", result.tuningState)
+      }
+
+    reactApplicationContext
+      .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+      .emit("RealtimeAudioAnalyzer:onPitch", payload)
   }
 }

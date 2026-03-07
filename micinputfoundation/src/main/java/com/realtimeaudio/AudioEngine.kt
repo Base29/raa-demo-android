@@ -30,6 +30,8 @@ class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
     private val micProcessor: RealtimeMicProcessor = RealtimeMicProcessor()
     // Real-time-safe FFT engine (KissFFT via JNI)
     private val fftEngine: RealtimeFFTEngine = RealtimeFFTEngine(fftSize = fftSize, downsampleBins = downsampleBins)
+    // Native pitch detection (YIN + smoothing + stability)
+    private var pitchEngine: PitchDetectionEngine? = null
 
     // Single reusable background worker for non-real-time DSP work
     private val processingExecutor: ExecutorService =
@@ -45,6 +47,7 @@ class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
         val peak: Double,
         val fft: FloatArray?,
         val timeData: FloatArray?,
+        val pitch: PitchResult?,
         val sampleRate: Int,
         val bufferSize: Int
     )
@@ -67,7 +70,8 @@ class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
         sampleRate: Int,
         callbackRateHz: Int,
         emitFft: Boolean,
-        emitTimeData: Boolean = true
+        emitTimeData: Boolean = true,
+        calibrationA4Hz: Double? = null
     ) {
         if (isRunning) {
             rtLogger.warning("Audio engine already running")
@@ -109,6 +113,9 @@ class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
         
         // Update actual sample rate
         this.sampleRate = actualSampleRate
+        this.pitchEngine = PitchDetectionEngine(sampleRate = this.sampleRate).apply {
+            if (calibrationA4Hz != null) setCalibrationA4(calibrationA4Hz)
+        }
         
         // We might need a larger internal buffer than the requested processing bufferSize
         val recordBufferSize = kotlin.math.max(minBufferSize, bufferSize * 2)
@@ -172,6 +179,7 @@ class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
         // Reset DSP components; they are real-time safe and allocation-free during processing.
         micProcessor.reset()
         fftEngine.reset()
+        pitchEngine?.reset()
         rtLogger.stop()
     }
 
@@ -259,6 +267,12 @@ class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
         val levelData = micProcessor.processBuffer(rawSamples, bufferSize)
         val rms = levelData.rms.toDouble()
         val peak = levelData.peak.toDouble()
+        val inputLevelDbfs = if (rms <= 0.0) -120.0 else (20.0 * kotlin.math.log10(rms))
+        val pitch = pitchEngine?.processFrame(
+            frame = rawSamples,
+            timestampSec = timestamp / 1000.0,
+            inputLevelDbfs = inputLevelDbfs
+        )
 
         // --- FFT Spectrum Analysis (KissFFT via JNI) ---
         // Respect the emitFft flag; if disabled or FFT engine fails, fftMagnitudes will be null.
@@ -274,6 +288,7 @@ class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
             peak = peak,
             fft = fftMagnitudes,
             timeData = timeData,
+            pitch = pitch,
             sampleRate = sampleRate,
             bufferSize = bufferSize
         )
