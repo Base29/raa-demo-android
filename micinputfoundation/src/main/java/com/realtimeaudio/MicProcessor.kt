@@ -123,7 +123,7 @@ class RealtimeMicProcessor : MicProcessor, MicProcessorTestable {
         var peak = 0.0f
         
         // Unrolled loop for better performance (process 4 samples at a time when possible)
-        val unrolledCount = actualCount and 0xFFFFFFFC // Round down to multiple of 4
+        val unrolledCount = actualCount and -4 // Round down to multiple of 4
         var i = 0
         
         // Process 4 samples at a time for better CPU pipeline utilization

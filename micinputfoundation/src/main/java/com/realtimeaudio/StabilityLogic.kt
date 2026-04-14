@@ -6,13 +6,12 @@ import kotlin.math.min
 
 data class StabilityStatus(
     val isSilence: Boolean,
-    val isStable: Boolean
+    val isStable: Boolean,
+    val requiredWindowSec: Double
 )
 
 class StabilityLogic(
-    private val silenceThresholdDbfs: Double = -50.0,
-    private val stableWindowSec: Double = 0.120,
-    private val maxCentsVariation: Double = 3.0
+    private val maxCentsVariation: Double = TunerConfig.STABLE_MAX_CENTS_VARIATION
 ) {
     private var candidateMidi: Int? = null
     private var windowStartSec: Double = 0.0
@@ -30,21 +29,22 @@ class StabilityLogic(
         timestampSec: Double,
         noteMidi: Int?,
         centsOffset: Double?,
-        inputLevelDbfs: Double?
+        isSilence: Boolean,
+        requiredStableWindowSec: Double
     ): StabilityStatus {
-        if (inputLevelDbfs != null && inputLevelDbfs < silenceThresholdDbfs) {
+        if (isSilence) {
             reset()
-            return StabilityStatus(isSilence = true, isStable = false)
+            return StabilityStatus(isSilence = true, isStable = false, requiredWindowSec = requiredStableWindowSec)
         }
 
         if (noteMidi == null || centsOffset == null) {
             reset()
-            return StabilityStatus(isSilence = false, isStable = false)
+            return StabilityStatus(isSilence = false, isStable = false, requiredWindowSec = requiredStableWindowSec)
         }
 
         if (abs(centsOffset) > 50.0) {
             reset()
-            return StabilityStatus(isSilence = false, isStable = false)
+            return StabilityStatus(isSilence = false, isStable = false, requiredWindowSec = requiredStableWindowSec)
         }
 
         val currentCandidate = candidateMidi
@@ -53,7 +53,7 @@ class StabilityLogic(
             windowStartSec = timestampSec
             minCents = centsOffset
             maxCents = centsOffset
-            return StabilityStatus(isSilence = false, isStable = false)
+            return StabilityStatus(isSilence = false, isStable = false, requiredWindowSec = requiredStableWindowSec)
         }
 
         minCents = min(minCents, centsOffset)
@@ -61,7 +61,11 @@ class StabilityLogic(
 
         val elapsed = timestampSec - windowStartSec
         val range = maxCents - minCents
-        val isStable = elapsed >= stableWindowSec && range <= (maxCentsVariation * 2.0)
+        val stableWindow = requiredStableWindowSec.coerceIn(
+            TunerConfig.STABLE_WINDOW_MIN_SEC,
+            TunerConfig.STABLE_WINDOW_MAX_SEC
+        )
+        val isStable = elapsed >= stableWindow && range <= (maxCentsVariation * 2.0)
 
         // If it became wildly unstable within the window, restart the stability window to avoid
         // "sticking" to a note when the performer is changing pitch rapidly.
@@ -71,6 +75,6 @@ class StabilityLogic(
             maxCents = centsOffset
         }
 
-        return StabilityStatus(isSilence = false, isStable = isStable)
+        return StabilityStatus(isSilence = false, isStable = isStable, requiredWindowSec = stableWindow)
     }
 }

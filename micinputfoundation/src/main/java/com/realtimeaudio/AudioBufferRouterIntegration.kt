@@ -20,7 +20,8 @@ class AudioBufferRouterIntegrationExample {
     // MARK: - Configuration
     
     private var onLevelData: ((LevelData) -> Unit)? = null
-    private var onFFTData: ((FFTProcessorAdapter.FFTData) -> Unit)? = null
+    private var onFFTData: ((FFTData) -> Unit)? = null
+    private val fftEngine: FFTEngine = RealtimeFFTEngine(fftSize = 1024, downsampleBins = -1)
     
     // MARK: - Initialization
     
@@ -36,8 +37,8 @@ class AudioBufferRouterIntegrationExample {
             onLevelData?.invoke(levelData)
         }
         
-        // Create FFT processor adapter (placeholder for future FFT engine)
-        val fftAdapter = FFTProcessorAdapter { fftData ->
+        // Create FFT processor adapter (decoupled FFT engine)
+        val fftAdapter = FFTProcessorAdapter(fftEngine) { fftData ->
             onFFTData?.invoke(fftData)
         }
         
@@ -53,7 +54,7 @@ class AudioBufferRouterIntegrationExample {
         onLevelData = callback
     }
     
-    fun setFFTDataCallback(callback: (FFTProcessorAdapter.FFTData) -> Unit) {
+    fun setFFTDataCallback(callback: (FFTData) -> Unit) {
         onFFTData = callback
     }
     
@@ -120,7 +121,7 @@ class AudioBufferRouterIntegrationExample {
                 if (enabled) {
                     // Ensure FFT processor is in the list
                     if (processors.none { it is FFTProcessorAdapter }) {
-                        val fftAdapter = FFTProcessorAdapter { fftData ->
+                        val fftAdapter = FFTProcessorAdapter(fftEngine) { fftData ->
                             onFFTData?.invoke(fftData)
                         }
                         processors.add(fftAdapter)

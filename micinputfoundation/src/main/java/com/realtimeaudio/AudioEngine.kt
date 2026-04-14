@@ -74,7 +74,7 @@ class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
         calibrationA4Hz: Double? = null
     ) {
         if (isRunning) {
-            rtLogger.warning("Audio engine already running")
+            Log.w(TAG, "Audio engine already running")
             return
         }
 
@@ -98,7 +98,7 @@ class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
         
         // If 48kHz fails, try 44.1kHz fallback
         if (minBufferSize == AudioRecord.ERROR || minBufferSize == AudioRecord.ERROR_BAD_VALUE) {
-            rtLogger.warning("48kHz not supported, falling back to 44.1kHz")
+            Log.w(TAG, "48kHz not supported, falling back to 44.1kHz")
             actualSampleRate = 44100
             minBufferSize = AudioRecord.getMinBufferSize(
                 actualSampleRate,
@@ -153,11 +153,11 @@ class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
         try {
             processingThread?.join(1000) // Wait up to 1 second
             if (processingThread?.isAlive == true) {
-                rtLogger.warning("Processing thread did not terminate gracefully")
+                Log.w(TAG, "Processing thread did not terminate gracefully")
                 processingThread?.interrupt()
             }
         } catch (e: InterruptedException) {
-            rtLogger.warning("Interrupted while waiting for processing thread: ${e.message}")
+            Log.w(TAG, "Interrupted while waiting for processing thread", e)
             Thread.currentThread().interrupt()
         }
         processingThread = null
@@ -167,7 +167,7 @@ class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
             audioRecord?.stop()
             audioRecord?.release()
         } catch (e: Exception) {
-            rtLogger.warning("Error stopping AudioRecord: ${e.message}")
+            Log.w(TAG, "Error stopping AudioRecord", e)
         }
         audioRecord = null
         
@@ -180,7 +180,6 @@ class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
         micProcessor.reset()
         fftEngine.reset()
         pitchEngine?.reset()
-        rtLogger.stop()
     }
 
     fun isRecording(): Boolean {
@@ -268,11 +267,6 @@ class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
         val rms = levelData.rms.toDouble()
         val peak = levelData.peak.toDouble()
         val inputLevelDbfs = if (rms <= 0.0) -120.0 else (20.0 * kotlin.math.log10(rms))
-        val pitch = pitchEngine?.processFrame(
-            frame = rawSamples,
-            timestampSec = timestamp / 1000.0,
-            inputLevelDbfs = inputLevelDbfs
-        )
 
         // --- FFT Spectrum Analysis (KissFFT via JNI) ---
         // Respect the emitFft flag; if disabled or FFT engine fails, fftMagnitudes will be null.
@@ -281,6 +275,14 @@ class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
         } else {
             null
         }
+
+        val pitch = pitchEngine?.processFrame(
+            frame = rawSamples,
+            timestampSec = timestamp / 1000.0,
+            inputLevelDbfs = inputLevelDbfs,
+            fftMagnitudes = fftMagnitudes,
+            fftSize = this.fftSize
+        )
 
         val data = AudioData(
             timestamp = timestamp,

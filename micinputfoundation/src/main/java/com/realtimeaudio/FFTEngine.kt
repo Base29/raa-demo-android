@@ -86,6 +86,8 @@ class RealtimeFFTEngine(
     // MARK: - Pre-allocated Buffers
     
     private var fftOutput: FloatArray = FloatArray(0)
+    private var downsampleOutput: FloatArray = FloatArray(0)
+    private var lastTimestampMs: Long = 0L
     
     // MARK: - Initialization
     
@@ -128,19 +130,26 @@ class RealtimeFFTEngine(
         }
         
         try {
-            // Execute FFT using native implementation
+            // Execute FFT using native implementation.
             computeFft(samples, fftOutput, processCount)
-            
-            // Prepare output data
-            val outputMagnitudes: FloatArray = if (downsampleBins > 0 && downsampleBins < neededSize) {
-                resampleFft(fftOutput, neededSize, downsampleBins)
+
+            // Prepare output data WITHOUT per-call allocations:
+            // - If downsampling is requested, reuse a dedicated buffer.
+            // - Otherwise, expose the preallocated fftOutput view (first neededSize bins are valid).
+            val out: FloatArray = if (downsampleBins > 0 && downsampleBins < neededSize) {
+                if (downsampleOutput.size != downsampleBins) {
+                    // Reallocated only on configuration changes; not expected in steady-state.
+                    downsampleOutput = FloatArray(downsampleBins)
+                }
+                resampleFftInto(fftOutput, neededSize, downsampleOutput, downsampleBins)
+                downsampleOutput
             } else {
-                fftOutput.copyOfRange(0, neededSize)
+                fftOutput
             }
-            
-            val timestamp = System.currentTimeMillis()
-            return FFTData(magnitudes = outputMagnitudes, timestamp = timestamp)
-            
+
+            lastTimestampMs = System.currentTimeMillis()
+            return FFTData(magnitudes = out, timestamp = lastTimestampMs)
+
         } catch (e: UnsatisfiedLinkError) {
             // JNI method not found - library may not be loaded
             // Fail silently to maintain real-time safety
@@ -181,6 +190,11 @@ class RealtimeFFTEngine(
         // Allocate output buffer
         val neededSize = fftSize / 2
         fftOutput = FloatArray(neededSize + 10) // Add some padding for safety
+        if (downsampleBins > 0) {
+            downsampleOutput = FloatArray(downsampleBins)
+        } else {
+            downsampleOutput = FloatArray(0)
+        }
     }
     
     private fun cleanup() {
@@ -194,28 +208,26 @@ class RealtimeFFTEngine(
     }
     
     /**
-     * Simple bin averaging for downsampling
+     * Simple bin averaging for downsampling (writes into preallocated output).
      */
-    private fun resampleFft(src: FloatArray, srcLen: Int, destLen: Int): FloatArray {
-        val dest = FloatArray(destLen)
+    private fun resampleFftInto(src: FloatArray, srcLen: Int, dest: FloatArray, destLen: Int) {
         val bucketSize = srcLen.toFloat() / destLen.toFloat()
-        
+
         for (i in 0 until destLen) {
             val startIndex = (i * bucketSize).toInt()
             val endIndex = ((i + 1) * bucketSize).toInt().coerceAtMost(srcLen)
-            
+
             if (startIndex >= endIndex) {
-                if (startIndex < srcLen) dest[i] = src[startIndex]
+                dest[i] = if (startIndex < srcLen) src[startIndex] else 0.0f
                 continue
             }
-            
+
             var sum = 0.0f
             for (j in startIndex until endIndex) {
                 sum += src[j]
             }
             dest[i] = sum / (endIndex - startIndex)
         }
-        return dest
     }
     
     companion object {
