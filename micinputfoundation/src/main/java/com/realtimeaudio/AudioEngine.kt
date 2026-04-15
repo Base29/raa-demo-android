@@ -5,8 +5,6 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.util.Log
 import kotlin.math.sqrt
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
 
 class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
 
@@ -33,13 +31,8 @@ class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
     // Native pitch detection (YIN + smoothing + stability)
     private var pitchEngine: PitchDetectionEngine? = null
 
-    // Single reusable background worker for non-real-time DSP work
-    private val processingExecutor: ExecutorService =
-        Executors.newSingleThreadExecutor { runnable ->
-            Thread(runnable, "AudioEngine-Worker").apply {
-                priority = Thread.NORM_PRIORITY
-            }
-        }
+    // Latest-frame-wins background worker for non-real-time DSP work (prevents backlog).
+    private val processingExecutor: LatestFrameExecutor = LatestFrameExecutor("AudioEngine-Worker")
 
     data class AudioData(
         val timestamp: Double,
@@ -52,8 +45,6 @@ class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
         val bufferSize: Int
     )
 
-    private var libraryLoaded = false
-
     init {
         setupComponents()
     }
@@ -62,49 +53,48 @@ class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
         // Configure DSP components with the current settings.
         // This keeps the capture loop simple while still providing analyzers.
         micProcessor.configure(smoothingEnabled, smoothingFactor)
-        fftEngine.configure(fftSize, downsampleBins)
+        fftEngine.isEnabled = emitFft
+        if (emitFft) {
+            fftEngine.configure(fftSize, downsampleBins)
+        }
     }
 
-    fun start(
-        bufferSize: Int,
-        sampleRate: Int,
-        callbackRateHz: Int,
-        emitFft: Boolean,
-        emitTimeData: Boolean = true,
-        calibrationA4Hz: Double? = null
-    ) {
+    fun start(config: AnalyzerConfig) {
         if (isRunning) {
             Log.w(TAG, "Audio engine already running")
             return
         }
 
-        this.bufferSize = bufferSize
-        this.sampleRate = sampleRate
-        this.callbackRateHz = callbackRateHz
-        this.emitFft = emitFft
-        this.emitTimeData = emitTimeData
-        this.fftSize = bufferSize // Default FFT size to buffer size
+        val validated = config.validated()
+
+        this.bufferSize = validated.bufferSizeFrames
+        this.sampleRate = validated.sampleRateHz
+        this.callbackRateHz = validated.callbackRateHz
+        this.emitFft = validated.enableFft
+        this.emitTimeData = validated.enableTimeData
+        this.fftSize = if (validated.enableFft) validated.fftSize else 0
 
         // Setup components with new configuration
         setupComponents()
 
         // Ensure safe buffer size with fallback sample rate logic
-        var actualSampleRate = sampleRate
-        var minBufferSize = AudioRecord.getMinBufferSize(
-            actualSampleRate,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT
-        )
+        fun tryMinBuffer(sr: Int): Int =
+            AudioRecord.getMinBufferSize(sr, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+
+        var actualSampleRate = validated.sampleRateHz
+        var minBufferSize = tryMinBuffer(actualSampleRate)
+
+        // Prefer 48k if the requested rate fails.
+        if ((minBufferSize == AudioRecord.ERROR || minBufferSize == AudioRecord.ERROR_BAD_VALUE) && actualSampleRate != 48_000) {
+            actualSampleRate = 48_000
+            minBufferSize = tryMinBuffer(actualSampleRate)
+        }
         
         // If 48kHz fails, try 44.1kHz fallback
         if (minBufferSize == AudioRecord.ERROR || minBufferSize == AudioRecord.ERROR_BAD_VALUE) {
             Log.w(TAG, "48kHz not supported, falling back to 44.1kHz")
             actualSampleRate = 44100
-            minBufferSize = AudioRecord.getMinBufferSize(
-                actualSampleRate,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT
-            )
+            minBufferSize = tryMinBuffer(actualSampleRate)
         }
         
         if (minBufferSize == AudioRecord.ERROR || minBufferSize == AudioRecord.ERROR_BAD_VALUE) {
@@ -114,11 +104,12 @@ class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
         // Update actual sample rate
         this.sampleRate = actualSampleRate
         this.pitchEngine = PitchDetectionEngine(sampleRate = this.sampleRate).apply {
-            if (calibrationA4Hz != null) setCalibrationA4(calibrationA4Hz)
+            if (validated.calibrationA4Hz != null) setCalibrationA4(validated.calibrationA4Hz)
+            debugEnabled = validated.debugPitch
         }
         
         // We might need a larger internal buffer than the requested processing bufferSize
-        val recordBufferSize = kotlin.math.max(minBufferSize, bufferSize * 2)
+        val recordBufferSize = kotlin.math.max(minBufferSize, this.bufferSize * 2)
 
         try {
             audioRecord = AudioRecord(
@@ -173,6 +164,7 @@ class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
         
         // Cleanup components
         cleanupComponents()
+        processingExecutor.shutdownNow()
     }
 
     private fun cleanupComponents() {
@@ -197,11 +189,18 @@ class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
         // Update FFT configuration and reconfigure the FFT engine.
         this.fftSize = size
         this.downsampleBins = bins
-        fftEngine.configure(this.fftSize, this.downsampleBins)
+        fftEngine.isEnabled = emitFft
+        if (emitFft) {
+            fftEngine.configure(this.fftSize, this.downsampleBins)
+        }
     }
 
     fun setTimeDataConfig(enabled: Boolean) {
         this.emitTimeData = enabled
+    }
+
+    fun setPitchDebug(enabled: Boolean) {
+        pitchEngine?.debugEnabled = enabled
     }
 
     private fun processAudio() {
@@ -234,7 +233,7 @@ class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
                     val timestampMs = nowNs / 1_000_000.0
 
                     // Offload non-real-time DSP work to a single reusable background worker
-                    processingExecutor.execute {
+                    processingExecutor.executeLatest(Runnable {
                         processAudioData(
                             timestamp = timestampMs,
                             sampleRate = sampleRate,
@@ -242,7 +241,7 @@ class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
                             timeData = if (emitTimeData) floatBuffer.copyOfRange(0, readCount) else null,
                             rawSamples = floatBuffer.copyOfRange(0, readCount)
                         )
-                    }
+                    })
 
                     lastCallbackTimeNs = nowNs
                 }

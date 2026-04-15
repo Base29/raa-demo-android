@@ -40,6 +40,8 @@ class PitchDetectionEngine(val sampleRate: Int) {
     @Volatile var debugLastChosenDivisor: Int = 1
         private set
 
+    var debugEnabled: Boolean = false
+
     private val maxTau: Int = max(2, (sampleRate / minFreqHz).toInt())
 
     // We target enough samples to reliably cover maxTau (YIN uses N-tau; a common rule of thumb is N >= 2*maxTau).
@@ -79,8 +81,37 @@ class PitchDetectionEngine(val sampleRate: Int) {
     fun reset() {
         ringWrite = 0
         ringCount = 0
+        ring.fill(0.0f)
         stability.reset()
         resetSmoothing()
+        noiseFloorDbfs = TunerConfig.NOISE_FLOOR_MIN_DBFS
+        centsHistory.fill(0.0)
+        centsHistoryCount = 0
+        centsHistoryWrite = 0
+        lastStableMidi = null
+        lastStableCents = 0.0
+        debugLastTau = 0
+        debugLastCmndMin = 1.0
+        debugLastConfidence = 0.0
+        debugLastCompositeConfidence = 0.0
+        debugLastNoiseFloorDbfs = noiseFloorDbfs
+        debugLastSmoothingAlpha = 0.0
+        debugLastRequiredStableWindowSec = TunerConfig.STABLE_WINDOW_MAX_SEC
+        debugLastChosenDivisor = 1
+    }
+
+    private fun resetForReacquisition() {
+        // Keep noise floor (environment estimate) but clear pitch/stability history so reacquisition is clean.
+        stability.reset()
+        resetSmoothing()
+        centsHistory.fill(0.0)
+        centsHistoryCount = 0
+        centsHistoryWrite = 0
+        lastStableMidi = null
+        lastStableCents = 0.0
+        debugLastSmoothingAlpha = 0.0
+        debugLastRequiredStableWindowSec = TunerConfig.STABLE_WINDOW_MAX_SEC
+        debugLastChosenDivisor = 1
     }
 
     fun processFrame(
@@ -118,32 +149,32 @@ class PitchDetectionEngine(val sampleRate: Int) {
         // a provisional silence decision early to preserve current behavior.
         val silenceNow = isSilence(levelDbfs)
         if (silenceNow) {
-            stability.reset()
-            resetSmoothing()
-            lastStableMidi = null
+            resetForReacquisition()
             return PitchResult(
-                detectedFrequency = 0.0,
+                detectedFrequency = null,
                 noteName = null,
                 octave = null,
                 centsOffset = null,
                 confidence = 0.0,
                 inputLevel = levelDbfs,
                 isStable = false,
-                tuningState = "silence"
+                tuningState = TuningState.SILENCE,
+                debug = if (debugEnabled) buildDebug(raw = null, inputLevelDbfs = levelDbfs, rawFrequencyHz = null) else null
             )
         }
 
         if (ringCount < analysisSize) {
-            stability.reset()
+            resetForReacquisition()
             return PitchResult(
-                detectedFrequency = 0.0,
+                detectedFrequency = null,
                 noteName = null,
                 octave = null,
                 centsOffset = null,
                 confidence = 0.0,
                 inputLevel = levelDbfs,
                 isStable = false,
-                tuningState = "unstable"
+                tuningState = TuningState.UNSTABLE,
+                debug = if (debugEnabled) buildDebug(raw = null, inputLevelDbfs = levelDbfs, rawFrequencyHz = null) else null
             )
         }
 
@@ -152,17 +183,17 @@ class PitchDetectionEngine(val sampleRate: Int) {
         val raw = detectPitchYin(analysisBuffer, analysisSize, levelDbfs, fftMagnitudes, fftSize)
         if (raw == null) {
             updateNoiseFloor(levelDbfs)
-            stability.reset()
-            lastStableMidi = null
+            resetForReacquisition()
             return PitchResult(
-                detectedFrequency = 0.0,
+                detectedFrequency = null,
                 noteName = null,
                 octave = null,
                 centsOffset = null,
                 confidence = 0.0,
                 inputLevel = levelDbfs,
                 isStable = false,
-                tuningState = "unstable"
+                tuningState = TuningState.UNSTABLE,
+                debug = if (debugEnabled) buildDebug(raw = null, inputLevelDbfs = levelDbfs, rawFrequencyHz = null) else null
             )
         }
 
@@ -194,14 +225,15 @@ class PitchDetectionEngine(val sampleRate: Int) {
             resetSmoothing()
             lastStableMidi = null
             return PitchResult(
-                detectedFrequency = 0.0,
+                detectedFrequency = null,
                 noteName = null,
                 octave = null,
                 centsOffset = null,
                 confidence = 0.0,
                 inputLevel = levelDbfs,
                 isStable = false,
-                tuningState = "silence"
+                tuningState = TuningState.SILENCE,
+                debug = if (debugEnabled) buildDebug(raw = raw, inputLevelDbfs = levelDbfs, rawFrequencyHz = raw.frequencyHz) else null
             )
         }
 
@@ -210,14 +242,15 @@ class PitchDetectionEngine(val sampleRate: Int) {
             if (compositeConfidence < 0.35) updateNoiseFloor(levelDbfs)
             lastStableMidi = null
             return PitchResult(
-                detectedFrequency = 0.0,
+                detectedFrequency = null,
                 noteName = null,
                 octave = null,
                 centsOffset = null,
                 confidence = 0.0,
                 inputLevel = levelDbfs,
                 isStable = false,
-                tuningState = "unstable"
+                tuningState = TuningState.UNSTABLE,
+                debug = if (debugEnabled) buildDebug(raw = raw, inputLevelDbfs = levelDbfs, rawFrequencyHz = raw.frequencyHz) else null
             )
         }
 
@@ -237,9 +270,9 @@ class PitchDetectionEngine(val sampleRate: Int) {
 
         val centsClamped = noteInfo.centsOffset.coerceIn(-50.0, 50.0)
         val tuningState = when {
-            abs(centsClamped) <= 3.0 -> "inTune"
-            abs(centsClamped) <= 10.0 -> "near"
-            else -> "outOfTune"
+            abs(centsClamped) <= 3.0 -> TuningState.IN_TUNE
+            abs(centsClamped) <= 10.0 -> TuningState.NEAR
+            else -> TuningState.OUT_OF_TUNE
         }
 
         return PitchResult(
@@ -250,7 +283,24 @@ class PitchDetectionEngine(val sampleRate: Int) {
             confidence = compositeConfidence,
             inputLevel = levelDbfs,
             isStable = true,
-            tuningState = tuningState
+            tuningState = tuningState,
+            debug = if (debugEnabled) buildDebug(raw = raw, inputLevelDbfs = levelDbfs, rawFrequencyHz = raw.frequencyHz) else null
+        )
+    }
+
+    private fun buildDebug(raw: PitchRaw?, inputLevelDbfs: Double?, rawFrequencyHz: Double?): PitchDebugInfo {
+        return PitchDebugInfo(
+            rawFrequencyHz = rawFrequencyHz,
+            compositeConfidence = debugLastCompositeConfidence,
+            cmndMin = raw?.cmndMin ?: debugLastCmndMin,
+            harmonicConsistency = raw?.harmonicConsistency ?: 0.0,
+            fftSupport = raw?.fftSupport ?: 0.0,
+            chosenDivisor = raw?.chosenDivisor ?: debugLastChosenDivisor,
+            inputLevelDbfs = inputLevelDbfs,
+            noiseFloorDbfs = noiseFloorDbfs,
+            smoothingAlpha = debugLastSmoothingAlpha,
+            requiredStableWindowSec = debugLastRequiredStableWindowSec,
+            lastTau = debugLastTau
         )
     }
 

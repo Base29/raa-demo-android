@@ -149,7 +149,11 @@ class PitchDetectionEngineOfflineTest {
             // After a short adaptation period, it should classify as silence (no stable note).
             if (k > 30) {
                 assertTrue(res != null)
-                assertTrue("Expected silence state in noisy room without pitch", res!!.tuningState == "silence" || res.tuningState == "unstable")
+                assertTrue(
+                    "Expected silence/unstable state in noisy room without pitch",
+                    res!!.tuningState == TuningState.SILENCE || res.tuningState == TuningState.UNSTABLE
+                )
+                assertTrue("Expected null frequency when no stable pitch", res!!.detectedFrequency == null)
             }
         }
     }
@@ -254,6 +258,132 @@ class PitchDetectionEngineOfflineTest {
         assertTrue("Expected longer stability window when noisy", winNoisy >= winStable - 1e-9)
         assertTrue(winNoisy in TunerConfig.STABLE_WINDOW_MIN_SEC..TunerConfig.STABLE_WINDOW_MAX_SEC)
         assertTrue(alphaNoisy in 0.0..1.0)
+    }
+
+    @Test
+    fun reset_clearsNoiseFloor_smoothing_history_andStableMemory() {
+        val sampleRate = 48_000
+        val engine = PitchDetectionEngine(sampleRate = sampleRate).apply { debugEnabled = true }
+
+        val frameSize = 2048
+        val frame = FloatArray(frameSize)
+        var t = 0.0
+        val dt = 1.0 / sampleRate.toDouble()
+        var ts = 0.0
+
+        // Drive into stable state and let noise floor adapt away from its minimum.
+        for (k in 0 until 30) {
+            for (i in 0 until frameSize) {
+                frame[i] = (0.7 * sin(2.0 * PI * 110.0 * t)).toFloat()
+                t += dt
+            }
+            engine.processFrame(frame, ts, inputLevelDbfs = -12.0)
+            ts += frameSize.toDouble() / sampleRate.toDouble()
+        }
+        val beforeNoiseFloor = engine.debugLastNoiseFloorDbfs
+        assertTrue(beforeNoiseFloor > TunerConfig.NOISE_FLOOR_MIN_DBFS)
+
+        engine.reset()
+
+        assertTrue(engine.debugLastNoiseFloorDbfs == TunerConfig.NOISE_FLOOR_MIN_DBFS)
+        assertTrue(engine.debugLastCompositeConfidence == 0.0)
+        assertTrue(engine.debugLastTau == 0)
+    }
+
+    @Test
+    fun fftValidation_increasesFftSupport_whenPeakIsPresent() {
+        val sampleRate = 48_000
+        val engine = PitchDetectionEngine(sampleRate = sampleRate)
+
+        val freq = 110.0
+        val frameSize = 4096
+        val frame = FloatArray(frameSize)
+        var t = 0.0
+        val dt = 1.0 / sampleRate.toDouble()
+        for (i in 0 until frameSize) {
+            frame[i] = (0.6 * sin(2.0 * PI * freq * t)).toFloat()
+            t += dt
+        }
+
+        val fftSize = 4096
+        val mags = FloatArray(fftSize / 2)
+        val bin = ((freq / sampleRate.toDouble()) * fftSize.toDouble()).toInt().coerceIn(1, mags.size - 2)
+        mags[bin] = 10.0f
+        mags[bin - 1] = 5.0f
+        mags[bin + 1] = 5.0f
+
+        val rawNoFft = engine.detectPitchYin(frame, frame.size, inputLevelDbfs = -10.0, fftMagnitudes = null, fftSize = null)
+        val rawWithFft = engine.detectPitchYin(frame, frame.size, inputLevelDbfs = -10.0, fftMagnitudes = mags, fftSize = fftSize)
+
+        assertNotNull(rawNoFft)
+        assertNotNull(rawWithFft)
+        assertTrue(rawWithFft!!.fftSupport >= rawNoFft!!.fftSupport)
+    }
+
+    @Test
+    fun detectsPluckedStringLikeSignal_withHarmonicsAndDecay() {
+        val sampleRate = 48_000
+        val engine = PitchDetectionEngine(sampleRate = sampleRate)
+
+        val f0 = 82.41
+        val frameSize = 4096
+        val frame = FloatArray(frameSize)
+        var ts = 0.0
+        var t = 0.0
+        val dt = 1.0 / sampleRate.toDouble()
+
+        var last: PitchRaw? = null
+        for (k in 0 until 12) {
+            for (i in 0 until frameSize) {
+                val time = t
+                // Simple pluck envelope: fast attack, exponential decay.
+                val env = kotlin.math.exp(-3.5 * (k * frameSize + i).toDouble() / (sampleRate.toDouble()))
+                val s =
+                    env * (
+                        0.9 * sin(2.0 * PI * f0 * time) +
+                            0.3 * sin(2.0 * PI * 2.0 * f0 * time) +
+                            0.15 * sin(2.0 * PI * 3.0 * f0 * time)
+                        )
+                frame[i] = s.toFloat()
+                t += dt
+            }
+            last = engine.detectPitchYin(frame, frame.size, inputLevelDbfs = -10.0) ?: last
+            ts += frameSize.toDouble() / sampleRate.toDouble()
+        }
+
+        assertNotNull(last)
+        assertTrue(abs(last!!.frequencyHz - f0) < 5.0)
+    }
+
+    @Test
+    fun detectsVoiceLikeSignal_withMildVibrato_andHarmonics() {
+        val sampleRate = 48_000
+        val engine = PitchDetectionEngine(sampleRate = sampleRate)
+
+        val f0 = 196.0 // G3-ish
+        val frameSize = 2048
+        val frame = FloatArray(frameSize)
+        var t = 0.0
+        val dt = 1.0 / sampleRate.toDouble()
+
+        var last: PitchRaw? = null
+        for (k in 0 until 18) {
+            for (i in 0 until frameSize) {
+                val vibratoCents = 15.0 * sin(2.0 * PI * 5.5 * t) // ~5.5 Hz vibrato
+                val ratio = kotlin.math.exp((vibratoCents / 1200.0) * ln(2.0))
+                val f = f0 * ratio
+                val s =
+                    0.55 * sin(2.0 * PI * f * t) +
+                        0.18 * sin(2.0 * PI * 2.0 * f * t) +
+                        0.08 * sin(2.0 * PI * 3.0 * f * t)
+                frame[i] = s.toFloat()
+                t += dt
+            }
+            last = engine.detectPitchYin(frame, frame.size, inputLevelDbfs = -12.0) ?: last
+        }
+
+        assertNotNull(last)
+        assertTrue(abs(last!!.frequencyHz - f0) < 8.0)
     }
 }
 

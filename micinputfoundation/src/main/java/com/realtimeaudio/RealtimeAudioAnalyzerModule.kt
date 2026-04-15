@@ -29,18 +29,38 @@ class RealtimeAudioAnalyzerModule(
 
   override fun startAnalysis(config: ReadableMap, promise: Promise) {
     try {
-      val bufferSize = if (config.hasKey("fftSize")) config.getInt("fftSize") else 1024
-      val sampleRate = if (config.hasKey("sampleRate")) config.getInt("sampleRate") else 44100
-      val callbackRateHz = 30
-      val emitFft = true
+      val bufferSize = when {
+        config.hasKey("bufferSize") -> config.getInt("bufferSize")
+        config.hasKey("bufferSizeFrames") -> config.getInt("bufferSizeFrames")
+        else -> 1024
+      }
+      val sampleRate = if (config.hasKey("sampleRate")) config.getInt("sampleRate") else 48000
+      val fftSize = when {
+        config.hasKey("fftSize") -> config.getInt("fftSize")
+        else -> 1024
+      }
+      val callbackRateHz = if (config.hasKey("callbackRateHz")) config.getInt("callbackRateHz") else 30
+      val enableFft = if (config.hasKey("enableFft")) config.getBoolean("enableFft") else true
       val emitTimeData = if (config.hasKey("enableTimeData")) config.getBoolean("enableTimeData") else true
+      val debugPitch = if (config.hasKey("debugPitch")) config.getBoolean("debugPitch") else false
       val calibrationA4Hz: Double? = when {
         config.hasKey("calibrationA4Hz") -> config.getDouble("calibrationA4Hz")
         config.hasKey("a4Hz") -> config.getDouble("a4Hz")
         else -> null
       }
 
-      engine.start(bufferSize, sampleRate, callbackRateHz, emitFft, emitTimeData, calibrationA4Hz)
+      engine.start(
+        AnalyzerConfig(
+          bufferSizeFrames = bufferSize,
+          sampleRateHz = sampleRate,
+          fftSize = fftSize,
+          callbackRateHz = callbackRateHz,
+          enableFft = enableFft,
+          enableTimeData = emitTimeData,
+          calibrationA4Hz = calibrationA4Hz,
+          debugPitch = debugPitch
+        )
+      )
       promise.resolve(null)
     } catch (e: SecurityException) {
       promise.reject("E_PERMISSION_DENIED", "Microphone permission denied: ${e.message}", e)
@@ -60,8 +80,11 @@ class RealtimeAudioAnalyzerModule(
 
   override fun getAnalysisConfig(promise: Promise) {
     val config = Arguments.createMap().apply {
+      putInt("bufferSizeFrames", 1024)
       putInt("fftSize", 1024)
       putInt("sampleRate", 44100)
+      putInt("callbackRateHz", 30)
+      putBoolean("enableFft", true)
       putString("windowFunction", "hanning")
       putDouble("smoothing", 0.8)
     }
@@ -129,14 +152,32 @@ class RealtimeAudioAnalyzerModule(
 
     val payload: WritableMap =
       Arguments.createMap().apply {
-        putDouble("detectedFrequency", result.detectedFrequency)
+        if (result.detectedFrequency != null) putDouble("detectedFrequency", result.detectedFrequency) else putNull("detectedFrequency")
         if (result.noteName != null) putString("noteName", result.noteName) else putNull("noteName")
         if (result.octave != null) putInt("octave", result.octave) else putNull("octave")
         if (result.centsOffset != null) putDouble("centsOffset", result.centsOffset) else putNull("centsOffset")
         putDouble("confidence", result.confidence)
         if (result.inputLevel != null) putDouble("inputLevel", result.inputLevel) else putNull("inputLevel")
         putBoolean("isStable", result.isStable)
-        putString("tuningState", result.tuningState)
+        putString("tuningState", result.tuningState.serialized)
+
+        // Optional debug payload (off by default).
+        result.debug?.let { d ->
+          val dbg = Arguments.createMap().apply {
+            if (d.rawFrequencyHz != null) putDouble("rawFrequencyHz", d.rawFrequencyHz) else putNull("rawFrequencyHz")
+            putDouble("compositeConfidence", d.compositeConfidence)
+            putDouble("cmndMin", d.cmndMin)
+            putDouble("harmonicConsistency", d.harmonicConsistency)
+            putDouble("fftSupport", d.fftSupport)
+            putInt("chosenDivisor", d.chosenDivisor)
+            if (d.inputLevelDbfs != null) putDouble("inputLevelDbfs", d.inputLevelDbfs) else putNull("inputLevelDbfs")
+            putDouble("noiseFloorDbfs", d.noiseFloorDbfs)
+            putDouble("smoothingAlpha", d.smoothingAlpha)
+            putDouble("requiredStableWindowSec", d.requiredStableWindowSec)
+            putInt("lastTau", d.lastTau)
+          }
+          putMap("debug", dbg)
+        }
       }
 
     reactApplicationContext
