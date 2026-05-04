@@ -14,9 +14,10 @@ The `RecorderEngineAndroid` handles high-quality mono audio recording using the 
 - **Metering**: 
     - Emits `rmsDb` and `peakDb` values every 100ms.
     - Uses `maxAmplitude` to derive dB values relative to full scale (dBFS).
-- **Duration**: Emits real-time recording duration in seconds.
+- **Duration**: Emits real-time recording duration in seconds using `SystemClock.elapsedRealtime()` for monotonic accuracy.
 - **Safety**: 
-    - Handles safe file finalization on manual stop or unexpected errors.
+    - **Guarded Stop**: `MediaRecorder.stop()` is wrapped in logic to prevent crashes if recording is too short or already stopped.
+    - **State Management**: Returns `null` on `stopRecording()` if no session is active.
     - Ensures `MediaRecorder` resources are released properly to prevent state corruption.
 
 ## 2. Playback Engine (`PlaybackEngineAndroid.kt`)
@@ -25,40 +26,49 @@ The `PlaybackEngineAndroid` provides a robust audio player using the `MediaPlaye
 
 - **Core Features**: Load, Play, Pause, Stop, and Seek.
 - **Virtual Trimming**: 
-    - Supports `trimStart` and `trimEnd` metadata (passed during `load` or `play`).
-    - **No Modification**: The original file is never modified, sliced, or re-encoded.
-    - **Logic**: On play, it seeks to `trimStart`. During playback, a polling mechanism checks if `currentTime >= trimEnd` and automatically pauses/stops playback if reached.
-- **Events**: Emits `currentTime` and `duration` every 150ms.
+    - Supports `trimStart` and `trimEnd` metadata (passed during `load`).
+    - **Sanitization**: Automatically validates trim bounds (e.g., `trimStart < trimEnd`, `trimEnd <= fileDuration`).
+    - **Relative Progress**: All `currentTime` and `duration` emissions are relative to the virtual trim window (`currentTime = position - trimStart`).
+    - **Logic**: On play, it seeks to `trimStart`. During playback, a polling mechanism checks if `currentTime >= trimEnd` and automatically pauses playback if reached.
+- **Events**: Emits relative `currentTime` and `duration` every 150ms.
 - **States**: Emits state changes: `loaded`, `playing`, `paused`, `stopped`, `completed`, `error`.
-- **Interruption Handling**: Safely handles stop and reset operations.
+- **Interruption Handling**: `stop()` resets the position to `trimStart`.
 
-## 3. TurboModule Integration (`AudioModule.kt`)
+## 3. TurboModule Integration (Split Architecture)
 
-The integration layer bridges the native Kotlin engines to React Native using the TurboModule architecture.
+The integration layer bridges the native Kotlin engines to React Native using a split module architecture for better lifecycle management and parity with iOS.
 
-### JS Methods Exposed
-- **Recorder**:
-    - `startRecording(filePath: String)`: Starts recording to the specified path. Automatically stops any active playback.
-    - `stopRecording()`: Returns a Promise resolving to the finalized file path.
-- **Playback**:
-    - `load(filePath: String, options: { trimStart, trimEnd })`: Prepares a file for playback.
-    - `play(options?)`: Starts or resumes playback (respecting trim bounds).
+### Recorder Module (`RecorderModuleAndroid.kt`)
+- **Methods**:
+    - `startRecording(filePath: String)`: Starts recording. Automatically stops any active playback.
+    - `stopRecording()`: Returns a Promise resolving to the finalized file path (or `null`).
+- **Events**:
+    - `Recorder:onMeter`: `{ rmsDb, peakDb }`
+    - `Recorder:onDuration`: `{ duration }`
+    - `Recorder:onState`: `{ state }`
+    - `Recorder:onError`: `{ message }`
+
+### Playback Module (`PlaybackModuleAndroid.kt`)
+- **Methods**:
+    - `load(filePath: String, options: { trimStart, trimEnd })`: Prepares a file.
+    - `play(options?)`: Starts/resumes playback (respecting trim bounds).
     - `pause()`: Pauses playback.
-    - `stop()`: Stops playback and resets position to zero.
-    - `seek(positionInSeconds: Double)`: Jumps to a specific time.
-
-### Events Emitted to JS
-- `onRecorderMeter`: `{ rmsDb: Double, peakDb: Double }`
-- `onRecorderDuration`: `{ duration: Double }`
-- `onPlaybackPosition`: `{ currentTime: Double, duration: Double }`
-- `onPlaybackState`: `{ state: String }`
+    - `stop()`: Stops and resets to `trimStart`.
+    - `seek(positionInSeconds: Double)`: Jumps to a relative time within the trim window.
+- **Events**:
+    - `Playback:onPosition`: `{ currentTime, duration }`
+    - `Playback:onState`: `{ state }`
+    - `Playback:onError`: `{ message }`
 
 ### Orchestration Rules
-- **Recording Priority**: If `startRecording` is called while playback is active, the playback engine is stopped immediately to prevent audio feedback or session conflicts.
-- **Single Instance**: Engines are managed as instances within the module, ensuring consistent state across the application.
+- **Recording Priority**: If `startRecording` is called while playback is active, the playback engine is stopped immediately.
+- **Audio Focus**: Modules handle `AudioManager` focus requests to ensure clean audio sessions.
+- **Event Guards**: Uses `listenerCount` to avoid unnecessary bridge traffic when no JS listeners are active.
 
 ## Files Created/Modified
-- `micinputfoundation/src/main/java/com/realtimeaudio/RecorderEngineAndroid.kt` [NEW]
-- `micinputfoundation/src/main/java/com/realtimeaudio/PlaybackEngineAndroid.kt` [NEW]
-- `micinputfoundation/src/main/java/com/realtimeaudio/AudioModule.kt` [NEW]
+- `micinputfoundation/src/main/java/com/realtimeaudio/RecorderEngineAndroid.kt` [REFINED]
+- `micinputfoundation/src/main/java/com/realtimeaudio/PlaybackEngineAndroid.kt` [REFINED]
+- `micinputfoundation/src/main/java/com/realtimeaudio/RecorderModuleAndroid.kt` [NEW]
+- `micinputfoundation/src/main/java/com/realtimeaudio/PlaybackModuleAndroid.kt` [NEW]
 - `micinputfoundation/src/main/java/com/realtimeaudio/RealtimeAudioAnalyzerPackage.kt` [MODIFIED]
+- `micinputfoundation/src/main/java/com/realtimeaudio/AudioModule.kt` [DELETED]

@@ -17,7 +17,8 @@ enum class PlaybackState(val value: String) {
 
 class PlaybackEngineAndroid(
     private val onPositionUpdate: (currentTime: Double, duration: Double) -> Unit,
-    private val onStateChange: (state: PlaybackState) -> Unit
+    private val onStateChange: (state: PlaybackState) -> Unit,
+    private val onError: (message: String) -> Unit
 ) {
     private var mediaPlayer: MediaPlayer? = null
     private var isPlaying = false
@@ -42,26 +43,39 @@ class PlaybackEngineAndroid(
             mediaPlayer = MediaPlayer().apply {
                 setDataSource(filePath)
                 prepare()
-                this@PlaybackEngineAndroid.duration = duration.toDouble() / 1000.0
-                this@PlaybackEngineAndroid.trimStart = trimStart
-                this@PlaybackEngineAndroid.trimEnd = if (trimEnd > 0) trimEnd else this@PlaybackEngineAndroid.duration
+                val fileDuration = duration.toDouble() / 1000.0
+                this@PlaybackEngineAndroid.duration = fileDuration
+                
+                // Fix 4: Sanitize trimStart / trimEnd
+                var sanitizedStart = if (trimStart >= 0) trimStart else 0.0
+                val sanitizedEnd = if (trimEnd > 0 && trimEnd <= fileDuration) trimEnd else fileDuration
+                
+                if (sanitizedStart >= sanitizedEnd) {
+                    sanitizedStart = 0.0
+                }
+                
+                this@PlaybackEngineAndroid.trimStart = sanitizedStart
+                this@PlaybackEngineAndroid.trimEnd = sanitizedEnd
                 
                 setOnCompletionListener {
                     handleCompletion()
                 }
                 
                 setOnErrorListener { _, what, extra ->
-                    Log.e(TAG, "MediaPlayer error: what=$what, extra=$extra")
+                    val msg = "MediaPlayer error: what=$what, extra=$extra"
+                    Log.e(TAG, msg)
+                    onError(msg)
                     onStateChange(PlaybackState.ERROR)
                     true
                 }
             }
             
             onStateChange(PlaybackState.LOADED)
-            // Report initial position
-            onPositionUpdate(trimStart, duration)
+            // Report initial position (relative to trim)
+            onPositionUpdate(0.0, this.trimEnd - this.trimStart)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to load audio file", e)
+            onError("Failed to load: ${e.message}")
             onStateChange(PlaybackState.ERROR)
         }
     }
@@ -110,24 +124,29 @@ class PlaybackEngineAndroid(
                 if (this.isPlaying) {
                     this.stop()
                 }
-                this.seekTo(0)
-                // We don't release here unless we want to "load" again, 
-                // but usually stop means back to start.
+                // Fix 3: Reset to trimStart, not 0
+                this.seekTo((trimStart * 1000).toInt())
             } catch (e: Exception) {
                 Log.e(TAG, "Error stopping MediaPlayer", e)
             }
         }
         onStateChange(PlaybackState.STOPPED)
-        onPositionUpdate(0.0, duration)
+        // Relative progress: 0.0 at trimStart
+        onPositionUpdate(0.0, trimEnd - trimStart)
     }
 
     fun seek(positionInSeconds: Double) {
         val player = mediaPlayer ?: return
         try {
-            player.seekTo((positionInSeconds * 1000).toInt())
-            onPositionUpdate(positionInSeconds, duration)
+            // Fix 2: Clamp and make relative to trim
+            val clampedPos = positionInSeconds.coerceIn(0.0, trimEnd - trimStart)
+            val absolutePos = trimStart + clampedPos
+            
+            player.seekTo((absolutePos * 1000).toInt())
+            onPositionUpdate(clampedPos, trimEnd - trimStart)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to seek", e)
+            onError("Seek failed: ${e.message}")
         }
     }
 
@@ -135,17 +154,22 @@ class PlaybackEngineAndroid(
         mediaPlayer?.let { player ->
             try {
                 val currentPos = player.currentPosition / 1000.0
+                val relativePos = (currentPos - trimStart).coerceAtLeast(0.0)
+                val relativeDuration = trimEnd - trimStart
                 
                 // Virtual trimming check
                 if (trimEnd > 0 && currentPos >= trimEnd) {
                     player.pause()
                     player.seekTo((trimEnd * 1000).toInt()) // Snap to end
                     isPlaying = false
+                    
+                    // Fix 5: Emit final relative progress before "completed"
+                    onPositionUpdate(relativeDuration, relativeDuration)
                     onStateChange(PlaybackState.COMPLETED)
                     handler.removeCallbacks(updateRunnable)
-                    onPositionUpdate(trimEnd, duration)
                 } else {
-                    onPositionUpdate(currentPos, duration)
+                    // Fix 1: Progress must be relative to trim
+                    onPositionUpdate(relativePos, relativeDuration)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error updating position", e)
@@ -156,8 +180,9 @@ class PlaybackEngineAndroid(
     private fun handleCompletion() {
         isPlaying = false
         handler.removeCallbacks(updateRunnable)
+        // Fix 5: Emit final relative progress before "completed"
+        onPositionUpdate(trimEnd - trimStart, trimEnd - trimStart)
         onStateChange(PlaybackState.COMPLETED)
-        onPositionUpdate(duration, duration)
     }
 
     fun release() {

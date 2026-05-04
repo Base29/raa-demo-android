@@ -11,7 +11,8 @@ class RealtimeAudioAnalyzerPackage : TurboReactPackage() {
   override fun getModule(name: String, reactContext: ReactApplicationContext): NativeModule? {
     return when (name) {
       RealtimeAudioAnalyzerModule.NAME -> RealtimeAudioAnalyzerModule(reactContext)
-      AudioModule.NAME -> AudioModule(reactContext)
+      RecorderModuleAndroid.NAME -> RecorderModuleAndroid(reactContext)
+      PlaybackModuleAndroid.NAME -> PlaybackModuleAndroid(reactContext)
       else -> null
     }
   }
@@ -28,9 +29,18 @@ class RealtimeAudioAnalyzerPackage : TurboReactPackage() {
           false, // isCxxModule
           true   // isTurboModule
         ),
-        AudioModule.NAME to ReactModuleInfo(
-          AudioModule.NAME,
-          AudioModule.NAME,
+        RecorderModuleAndroid.NAME to ReactModuleInfo(
+          RecorderModuleAndroid.NAME,
+          RecorderModuleAndroid.NAME,
+          false, // canOverrideExistingModule
+          false, // needsEagerInit
+          false, // hasConstants
+          false, // isCxxModule
+          true   // isTurboModule
+        ),
+        PlaybackModuleAndroid.NAME to ReactModuleInfo(
+          PlaybackModuleAndroid.NAME,
+          PlaybackModuleAndroid.NAME,
           false, // canOverrideExistingModule
           false, // needsEagerInit
           false, // hasConstants
