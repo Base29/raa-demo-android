@@ -52,17 +52,18 @@ class RecorderEngineAndroid(
                 start()
             }
 
-            currentFilePath = filePath
+            // Requirement 3: Ensure recorder fully started before setting isRecording = true
             isRecording = true
+            currentFilePath = filePath
             startTime = SystemClock.elapsedRealtime()
             onStateChange("recording")
             handler.post(updateRunnable)
             Log.d(TAG, "Started recording to $filePath")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start recording", e)
+            // Requirement 4: Avoid double error flow (do not both throw and call onError)
             onError("Failed to start recording: ${e.message}")
             cleanup()
-            throw e
         }
     }
 
@@ -77,8 +78,19 @@ class RecorderEngineAndroid(
         return finalizedPath
     }
 
+    // Requirement 2: Add interruption handling
+    fun handleInterruption() {
+        if (!isRecording && mediaRecorder == null) return
+        
+        Log.i(TAG, "Handling recording interruption")
+        finalizeRecording()
+        cleanup()
+        onStateChange("interrupted")
+    }
+
     private fun finalizeRecording() {
-        if (!isRecording) return
+        // Requirement 1: Use mediaRecorder != null instead of isRecording check
+        if (mediaRecorder == null) return
         try {
             mediaRecorder?.stop()
         } catch (e: Exception) {
@@ -98,9 +110,8 @@ class RecorderEngineAndroid(
                     -100.0
                 }
                 
-                // For MediaRecorder, we don't have easy access to RMS. 
-                // We'll use peakDb as rmsDb for V1 or a slightly offset value.
-                // To keep it simple and deterministic:
+                // Requirement 5: For MediaRecorder, we don't have easy access to RMS. 
+                // RMS = peak (ok for V1 but document it)
                 val rmsDb = peakDb 
 
                 onMeterUpdate(rmsDb, peakDb)

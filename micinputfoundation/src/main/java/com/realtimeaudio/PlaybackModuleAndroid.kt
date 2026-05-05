@@ -34,6 +34,12 @@ class PlaybackModuleAndroid(
     )
 
     private val audioManager = reactContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    private val afChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
+        if (focusChange == AudioManager.AUDIOFOCUS_LOSS || focusChange == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
+            // Requirement 1: Stop safely and emit state/error
+            playbackEngine.stop()
+        }
+    }
 
     init {
         instance = this
@@ -48,18 +54,30 @@ class PlaybackModuleAndroid(
     }
 
     override fun play(options: ReadableMap?) {
-        audioManager.requestAudioFocus(null, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+        // Requirement 2: Check result of requestAudioFocus()
+        val result = audioManager.requestAudioFocus(afChangeListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+        if (result != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+            emit("Playback:onError", Arguments.createMap().apply {
+                putString("message", "Audio focus denied")
+            })
+            return
+        }
         playbackEngine.play()
     }
 
     override fun pause() {
         playbackEngine.pause()
-        audioManager.abandonAudioFocus(null)
+        audioManager.abandonAudioFocus(afChangeListener)
     }
 
     override fun stop() {
+        stopInternal()
+    }
+
+    // Requirement 4: Internal stop method for RecorderModuleAndroid
+    fun stopInternal() {
         playbackEngine.stop()
-        audioManager.abandonAudioFocus(null)
+        audioManager.abandonAudioFocus(afChangeListener)
     }
 
     override fun seek(positionInSeconds: Double) {
@@ -86,6 +104,8 @@ class PlaybackModuleAndroid(
     override fun invalidate() {
         super.invalidate()
         playbackEngine.release()
+        // Requirement 3: Also abandon audio focus
+        audioManager.abandonAudioFocus(afChangeListener)
         instance = null
     }
 }

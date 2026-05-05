@@ -37,7 +37,8 @@ class PlaybackEngineAndroid(
     }
 
     fun load(filePath: String, trimStart: Double = 0.0, trimEnd: Double = 0.0) {
-        stop() // Reset existing player
+        // Requirement 2: Release previous player before creating a new one
+        releaseCurrentPlayer()
         
         try {
             mediaPlayer = MediaPlayer().apply {
@@ -121,10 +122,10 @@ class PlaybackEngineAndroid(
         
         mediaPlayer?.apply {
             try {
+                // Requirement 1: Avoid calling MediaPlayer.stop(). Pause and seek instead.
                 if (this.isPlaying) {
-                    this.stop()
+                    this.pause()
                 }
-                // Fix 3: Reset to trimStart, not 0
                 this.seekTo((trimStart * 1000).toInt())
             } catch (e: Exception) {
                 Log.e(TAG, "Error stopping MediaPlayer", e)
@@ -185,10 +186,23 @@ class PlaybackEngineAndroid(
         onStateChange(PlaybackState.COMPLETED)
     }
 
+    private fun releaseCurrentPlayer() {
+        // Requirement 3: Internal cleanup without emitting state events
+        handler.removeCallbacks(updateRunnable)
+        isPlaying = false
+        mediaPlayer?.apply {
+            try {
+                release()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error releasing MediaPlayer", e)
+            }
+        }
+        mediaPlayer = null
+    }
+
     fun release() {
         stop()
-        mediaPlayer?.release()
-        mediaPlayer = null
+        releaseCurrentPlayer()
     }
 
     companion object {
