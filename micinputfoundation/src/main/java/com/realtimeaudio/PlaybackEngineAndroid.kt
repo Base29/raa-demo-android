@@ -12,7 +12,8 @@ enum class PlaybackState(val value: String) {
     PAUSED("paused"),
     STOPPED("stopped"),
     COMPLETED("completed"),
-    ERROR("error")
+    ERROR("error"),
+    INTERRUPTED("interrupted")
 }
 
 class PlaybackEngineAndroid(
@@ -25,6 +26,7 @@ class PlaybackEngineAndroid(
     private var trimStart: Double = 0.0
     private var trimEnd: Double = 0.0
     private var duration: Double = 0.0
+    private var isCompleted = false
     
     private val handler = Handler(Looper.getMainLooper())
     private val updateRunnable = object : Runnable {
@@ -36,6 +38,7 @@ class PlaybackEngineAndroid(
         }
     }
 
+    @Synchronized
     fun load(filePath: String, trimStart: Double = 0.0, trimEnd: Double = 0.0) {
         // Requirement 2: Release previous player before creating a new one
         releaseCurrentPlayer()
@@ -57,6 +60,7 @@ class PlaybackEngineAndroid(
                 
                 this@PlaybackEngineAndroid.trimStart = sanitizedStart
                 this@PlaybackEngineAndroid.trimEnd = sanitizedEnd
+                this@PlaybackEngineAndroid.isCompleted = false
                 
                 setOnCompletionListener {
                     handleCompletion()
@@ -65,8 +69,11 @@ class PlaybackEngineAndroid(
                 setOnErrorListener { _, what, extra ->
                     val msg = "MediaPlayer error: what=$what, extra=$extra"
                     Log.e(TAG, msg)
+                    handler.removeCallbacks(updateRunnable)
+                    isPlaying = false
                     onError(msg)
                     onStateChange(PlaybackState.ERROR)
+                    releaseCurrentPlayer()
                     true
                 }
             }
@@ -81,8 +88,14 @@ class PlaybackEngineAndroid(
         }
     }
 
+    @Synchronized
     fun play() {
-        val player = mediaPlayer ?: return
+        val player = mediaPlayer
+        if (player == null) {
+            onError("Not loaded")
+            onStateChange(PlaybackState.ERROR)
+            return
+        }
         if (isPlaying) return
 
         try {
@@ -94,6 +107,7 @@ class PlaybackEngineAndroid(
 
             player.start()
             isPlaying = true
+            isCompleted = false
             onStateChange(PlaybackState.PLAYING)
             handler.post(updateRunnable)
         } catch (e: Exception) {
@@ -102,6 +116,7 @@ class PlaybackEngineAndroid(
         }
     }
 
+    @Synchronized
     fun pause() {
         val player = mediaPlayer ?: return
         if (!isPlaying) return
@@ -116,7 +131,9 @@ class PlaybackEngineAndroid(
         }
     }
 
+    @Synchronized
     fun stop() {
+        if (mediaPlayer == null) return
         handler.removeCallbacks(updateRunnable)
         isPlaying = false
         
@@ -136,8 +153,33 @@ class PlaybackEngineAndroid(
         onPositionUpdate(0.0, trimEnd - trimStart)
     }
 
+    @Synchronized
+    fun handleInterruption() {
+        if (mediaPlayer == null) return
+        handler.removeCallbacks(updateRunnable)
+        isPlaying = false
+        
+        mediaPlayer?.apply {
+            try {
+                if (this.isPlaying) {
+                    this.pause()
+                }
+                this.seekTo((trimStart * 1000).toInt())
+            } catch (e: Exception) {
+                Log.e(TAG, "Error handling interruption in MediaPlayer", e)
+            }
+        }
+        onStateChange(PlaybackState.INTERRUPTED)
+    }
+
+    @Synchronized
     fun seek(positionInSeconds: Double) {
-        val player = mediaPlayer ?: return
+        val player = mediaPlayer
+        if (player == null) {
+            onError("Not loaded")
+            onStateChange(PlaybackState.ERROR)
+            return
+        }
         try {
             // Fix 2: Clamp and make relative to trim
             val clampedPos = positionInSeconds.coerceIn(0.0, trimEnd - trimStart)
@@ -166,7 +208,10 @@ class PlaybackEngineAndroid(
                     
                     // Fix 5: Emit final relative progress before "completed"
                     onPositionUpdate(relativeDuration, relativeDuration)
-                    onStateChange(PlaybackState.COMPLETED)
+                    if (!isCompleted) {
+                        isCompleted = true
+                        onStateChange(PlaybackState.COMPLETED)
+                    }
                     handler.removeCallbacks(updateRunnable)
                 } else {
                     // Fix 1: Progress must be relative to trim
@@ -183,9 +228,13 @@ class PlaybackEngineAndroid(
         handler.removeCallbacks(updateRunnable)
         // Fix 5: Emit final relative progress before "completed"
         onPositionUpdate(trimEnd - trimStart, trimEnd - trimStart)
-        onStateChange(PlaybackState.COMPLETED)
+        if (!isCompleted) {
+            isCompleted = true
+            onStateChange(PlaybackState.COMPLETED)
+        }
     }
 
+    @Synchronized
     private fun releaseCurrentPlayer() {
         // Requirement 3: Internal cleanup without emitting state events
         handler.removeCallbacks(updateRunnable)
@@ -200,10 +249,12 @@ class PlaybackEngineAndroid(
         mediaPlayer = null
     }
 
+    @Synchronized
     fun release() {
-        stop()
         releaseCurrentPlayer()
     }
+
+    fun isLoaded(): Boolean = mediaPlayer != null
 
     companion object {
         private const val TAG = "PlaybackEngineAndroid"

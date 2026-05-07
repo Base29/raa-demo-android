@@ -20,6 +20,7 @@ class PlaybackModuleAndroid(
     }
 
     private var listenerCount = 0
+    private var isInvalidated = false
     private val playbackEngine = PlaybackEngineAndroid(
         onPositionUpdate = { currentTime, duration -> emit("Playback:onPosition", Arguments.createMap().apply {
             putDouble("currentTime", currentTime)
@@ -37,7 +38,7 @@ class PlaybackModuleAndroid(
     private val afChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
         if (focusChange == AudioManager.AUDIOFOCUS_LOSS || focusChange == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
             // Requirement 1: Stop safely and emit state/error
-            playbackEngine.stop()
+            playbackEngine.handleInterruption()
         }
     }
 
@@ -54,6 +55,13 @@ class PlaybackModuleAndroid(
     }
 
     override fun play(options: ReadableMap?) {
+        if (!playbackEngine.isLoaded()) {
+            emit("Playback:onError", Arguments.createMap().apply {
+                putString("message", "Not loaded")
+            })
+            return
+        }
+        
         // Requirement 2: Check result of requestAudioFocus()
         val result = audioManager.requestAudioFocus(afChangeListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
         if (result != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
@@ -84,7 +92,9 @@ class PlaybackModuleAndroid(
         playbackEngine.seek(positionInSeconds)
     }
 
+    @Synchronized
     private fun emit(eventName: String, payload: WritableMap) {
+        if (isInvalidated) return
         if (listenerCount > 0 && reactApplicationContext.hasActiveReactInstance()) {
             reactApplicationContext
                 .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
@@ -92,17 +102,21 @@ class PlaybackModuleAndroid(
         }
     }
 
+    @Synchronized
     override fun addListener(eventName: String) {
         listenerCount++
     }
 
+    @Synchronized
     override fun removeListeners(count: Double) {
         listenerCount -= count.toInt()
         if (listenerCount < 0) listenerCount = 0
     }
 
+    @Synchronized
     override fun invalidate() {
         super.invalidate()
+        isInvalidated = true
         playbackEngine.release()
         // Requirement 3: Also abandon audio focus
         audioManager.abandonAudioFocus(afChangeListener)

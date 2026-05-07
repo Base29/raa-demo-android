@@ -30,10 +30,11 @@ class RecorderEngineAndroid(
         }
     }
 
-    fun startRecording(filePath: String) {
+    @Synchronized
+    fun startRecording(filePath: String): Boolean {
         if (isRecording) {
             Log.w(TAG, "Recording already in progress")
-            return
+            return false
         }
 
         try {
@@ -59,14 +60,17 @@ class RecorderEngineAndroid(
             onStateChange("recording")
             handler.post(updateRunnable)
             Log.d(TAG, "Started recording to $filePath")
+            return true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start recording", e)
             // Requirement 4: Avoid double error flow (do not both throw and call onError)
             onError("Failed to start recording: ${e.message}")
             cleanup()
+            return false
         }
     }
 
+    @Synchronized
     fun stopRecording(): String? {
         if (!isRecording) return null
 
@@ -79,6 +83,7 @@ class RecorderEngineAndroid(
     }
 
     // Requirement 2: Add interruption handling
+    @Synchronized
     fun handleInterruption() {
         if (!isRecording && mediaRecorder == null) return
         
@@ -100,6 +105,7 @@ class RecorderEngineAndroid(
     }
 
     private fun updateMeterAndDuration() {
+        if (!isRecording || mediaRecorder == null) return
         mediaRecorder?.let { recorder ->
             try {
                 val maxAmplitude = recorder.maxAmplitude
@@ -124,8 +130,11 @@ class RecorderEngineAndroid(
         }
     }
 
+    @Synchronized
     private fun cleanup() {
         isRecording = false
+        currentFilePath = null
+        startTime = 0
         handler.removeCallbacks(updateRunnable)
         
         try {
