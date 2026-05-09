@@ -122,11 +122,11 @@ class RecorderModuleAndroid(
 
     @Synchronized
     override fun invalidate() {
-        super.invalidate()
         isInvalidated = true
         recorderEngine.stopRecording()
         // Requirement 5: Also abandon audio focus after stopping
         audioManager.abandonAudioFocus(afChangeListener)
         instance = null
+        super.invalidate()
     }
 }

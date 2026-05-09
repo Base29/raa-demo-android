@@ -85,6 +85,7 @@ class PlaybackEngineAndroid(
             Log.e(TAG, "Failed to load audio file", e)
             onError("Failed to load: ${e.message}")
             onStateChange(PlaybackState.ERROR)
+            releaseCurrentPlayer()
         }
     }
 
@@ -112,6 +113,7 @@ class PlaybackEngineAndroid(
             handler.post(updateRunnable)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to play", e)
+            onError("Failed to play: ${e.message}")
             onStateChange(PlaybackState.ERROR)
         }
     }
@@ -128,6 +130,8 @@ class PlaybackEngineAndroid(
             handler.removeCallbacks(updateRunnable)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to pause", e)
+            onError("Failed to pause: ${e.message}")
+            onStateChange(PlaybackState.ERROR)
         }
     }
 
@@ -190,6 +194,7 @@ class PlaybackEngineAndroid(
         } catch (e: Exception) {
             Log.e(TAG, "Failed to seek", e)
             onError("Seek failed: ${e.message}")
+            onStateChange(PlaybackState.ERROR)
         }
     }
 
@@ -224,14 +229,13 @@ class PlaybackEngineAndroid(
     }
 
     private fun handleCompletion() {
+        if (isCompleted) return
         isPlaying = false
         handler.removeCallbacks(updateRunnable)
         // Fix 5: Emit final relative progress before "completed"
         onPositionUpdate(trimEnd - trimStart, trimEnd - trimStart)
-        if (!isCompleted) {
-            isCompleted = true
-            onStateChange(PlaybackState.COMPLETED)
-        }
+        isCompleted = true
+        onStateChange(PlaybackState.COMPLETED)
     }
 
     @Synchronized
@@ -255,6 +259,8 @@ class PlaybackEngineAndroid(
     }
 
     fun isLoaded(): Boolean = mediaPlayer != null
+
+    fun isPlaying(): Boolean = isPlaying
 
     companion object {
         private const val TAG = "PlaybackEngineAndroid"

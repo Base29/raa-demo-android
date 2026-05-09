@@ -100,7 +100,7 @@ class RecorderEngineAndroid(
             mediaRecorder?.stop()
         } catch (e: Exception) {
             Log.e(TAG, "MediaRecorder.stop() failed. Recording might be too short or already stopped.", e)
-            // We don't throw here as we want cleanup() to proceed
+            onError("Failed to stop recording: ${e.message}")
         }
     }
 

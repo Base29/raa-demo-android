@@ -74,8 +74,11 @@ class PlaybackModuleAndroid(
     }
 
     override fun pause() {
+        val wasPlaying = playbackEngine.isPlaying()
         playbackEngine.pause()
-        audioManager.abandonAudioFocus(afChangeListener)
+        if (wasPlaying) {
+            audioManager.abandonAudioFocus(afChangeListener)
+        }
     }
 
     override fun stop() {
@@ -84,8 +87,11 @@ class PlaybackModuleAndroid(
 
     // Requirement 4: Internal stop method for RecorderModuleAndroid
     fun stopInternal() {
+        val wasPlaying = playbackEngine.isPlaying()
         playbackEngine.stop()
-        audioManager.abandonAudioFocus(afChangeListener)
+        if (wasPlaying) {
+            audioManager.abandonAudioFocus(afChangeListener)
+        }
     }
 
     override fun seek(positionInSeconds: Double) {
@@ -115,11 +121,11 @@ class PlaybackModuleAndroid(
 
     @Synchronized
     override fun invalidate() {
-        super.invalidate()
         isInvalidated = true
         playbackEngine.release()
         // Requirement 3: Also abandon audio focus
         audioManager.abandonAudioFocus(afChangeListener)
         instance = null
+        super.invalidate()
     }
 }
