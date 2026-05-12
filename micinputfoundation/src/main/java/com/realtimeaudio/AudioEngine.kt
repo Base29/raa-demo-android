@@ -38,6 +38,8 @@ class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
         val timestamp: Double,
         val rms: Double,
         val peak: Double,
+        val rmsDb: Double,
+        val peakDb: Double,
         val fft: FloatArray?,
         val timeData: FloatArray?,
         val pitch: PitchResult?,
@@ -265,6 +267,11 @@ class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
         val levelData = micProcessor.processBuffer(rawSamples, bufferSize)
         val rms = levelData.rms.toDouble()
         val peak = levelData.peak.toDouble()
+        
+        // Calculate dBFS values with -60 to 0 clamping
+        val rmsDb = if (rms > 0.0) (20.0 * kotlin.math.log10(rms)).coerceIn(-60.0, 0.0) else -60.0
+        val peakDb = if (peak > 0.0) (20.0 * kotlin.math.log10(peak)).coerceIn(-60.0, 0.0) else -60.0
+        
         val inputLevelDbfs = if (rms <= 0.0) -120.0 else (20.0 * kotlin.math.log10(rms))
 
         // --- FFT Spectrum Analysis (KissFFT via JNI) ---
@@ -287,6 +294,8 @@ class AudioEngine(private val onDataCallback: (AudioData) -> Unit) {
             timestamp = timestamp,
             rms = rms,
             peak = peak,
+            rmsDb = rmsDb,
+            peakDb = peakDb,
             fft = fftMagnitudes,
             timeData = timeData,
             pitch = pitch,

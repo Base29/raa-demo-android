@@ -23,6 +23,7 @@ class RealtimeAudioAnalyzerModule(
     const val NAME = "RealtimeAudioAnalyzer"
   }
 
+  private var listenerCount = 0
   private val engine = AudioEngine { data -> sendEvent(data) }
 
   override fun getName(): String = NAME
@@ -116,18 +117,25 @@ class RealtimeAudioAnalyzerModule(
     promise.resolve(null)
   }
 
-  override fun addListener(eventName: String) { /* required by RN */ }
-  override fun removeListeners(count: Double) { /* required by RN */ }
+  override fun addListener(eventName: String) {
+    listenerCount++
+  }
+
+  override fun removeListeners(count: Double) {
+    listenerCount -= count.toInt()
+    if (listenerCount < 0) listenerCount = 0
+  }
 
   private fun sendEvent(data: AudioEngine.AudioData) {
-    // Use the supported API; hasActiveCatalystInstance is deprecated
-    if (!reactApplicationContext.hasActiveReactInstance()) return
+    if (listenerCount <= 0 || !reactApplicationContext.hasActiveReactInstance()) return
 
     fun params(): WritableMap =
       Arguments.createMap().apply {
         putDouble("timestamp", data.timestamp)
-        putDouble("volume", data.rms)
-        putDouble("peak", data.peak)
+        putDouble("rmsDb", data.rmsDb)
+        putDouble("peakDb", data.peakDb)
+        putDouble("volume", data.rms) // Keep for backward compatibility if needed
+        putDouble("peak", data.peak)   // Keep for backward compatibility if needed
         putInt("sampleRate", data.sampleRate)
         putInt("fftSize", data.bufferSize)
 
@@ -148,7 +156,7 @@ class RealtimeAudioAnalyzerModule(
   }
 
   private fun emitPitchUpdate(result: PitchResult) {
-    if (!reactApplicationContext.hasActiveReactInstance()) return
+    if (listenerCount <= 0 || !reactApplicationContext.hasActiveReactInstance()) return
 
     val payload: WritableMap =
       Arguments.createMap().apply {

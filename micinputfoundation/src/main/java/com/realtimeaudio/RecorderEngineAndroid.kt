@@ -109,15 +109,16 @@ class RecorderEngineAndroid(
         mediaRecorder?.let { recorder ->
             try {
                 val maxAmplitude = recorder.maxAmplitude
-                // Convert amplitude (0-32767) to dBFS
-                val peakDb = if (maxAmplitude > 0) {
-                    20 * log10(maxAmplitude.toDouble() / 32767.0)
+                val amplitude = maxAmplitude.toDouble() / 32767.0
+                
+                // Convert to dBFS and clamp to -60...0 range
+                val peakDb = if (amplitude > 0.0) {
+                    (20.0 * log10(amplitude)).coerceIn(-60.0, 0.0)
                 } else {
-                    -100.0
+                    -60.0
                 }
                 
-                // Requirement 5: For MediaRecorder, we don't have easy access to RMS. 
-                // RMS = peak (ok for V1 but document it)
+                // For MediaRecorder, we don't have easy access to RMS, so set it to peakDb
                 val rmsDb = peakDb 
 
                 onMeterUpdate(rmsDb, peakDb)
